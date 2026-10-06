@@ -1,0 +1,198 @@
+name: build-mac-linux
+
+# Builds the macOS and Linux apps for an existing AgentDeck release and
+# attaches them to that release in THIS repo.
+#
+# Why it lives here: this repo is public, so its Actions minutes are free and
+# unlimited (macOS runners included). The source repo (AgentDeck-src) is
+# private, so its release.yml burns the account's monthly minutes -- macOS at
+# 10x -- and stops building once they run out (v0.39.0 shipped Windows-only for
+# exactly that reason). The source is checked out with the read-only
+# AGENTDECK_SRC_TOKEN secret; nothing from it is published except the built apps,
+# which were always public.
+#
+# The steps mirror AgentDeck-src's release.yml `build-linux` / `build-mac` jobs.
+# Run it from the Actions tab: "build-mac-linux" -> Run workflow -> tag v0.39.0.
+# Any macOS/Linux files already on that release are replaced (only after the new
+# build succeeded); the Windows files are never touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (must exist in AgentDeck-src and here), e.g. v0.39.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-mac-linux-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: atik806/AgentDeck-src
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.AGENTDECK_SRC_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-dotnet@3951f0dfe7a07e2313ec93c75700083e2005cbab # v4.3.0
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+
+      - name: Install Qt/X11 runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0 \
+            libxcb-sync1 libx11-xcb1 libdbus-1-3 xvfb \
+            libportaudio2
+
+      - name: Check the tag matches version.py
+        run: |
+          v=$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' windows_launcher/version.py)
+          if [ "$v" != "${TAG#v}" ]; then
+            echo "version.py ($v) != tag ($TAG)" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install "pip==24.3.1"
+          pip install -c windows_launcher/constraints.txt -r windows_launcher/requirements.txt
+          pip install -c windows_launcher/constraints.txt ./voice_capture
+          pip install -c windows_launcher/constraints.txt -r windows_launcher/requirements-build.txt
+
+      - name: Build + pack
+        run: xvfb-run -a python linux-v4/packaging/build_linux.py
+
+      - name: Generate SHA256SUMS-linux.txt
+        run: |
+          python packaging/checksums.py linux-v4/packaging/Releases
+          mv linux-v4/packaging/Releases/SHA256SUMS.txt linux-v4/packaging/Releases/SHA256SUMS-linux.txt
+
+      # Only now that the new build exists: drop whatever Linux files the
+      # release carries (e.g. older builds copied over), keep everything else.
+      - name: Remove old Linux files from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' |
+            grep -Ei -- '(-linux-|releases\.linux\.json|SHA256SUMS-linux\.txt|AgentDeck-Linux-Install\.sh|\.AppImage$|^install\.sh$)' |
+            while read -r name; do
+              echo "deleting $name"
+              gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" -y
+            done
+
+      - name: Publish to the release
+        run: >
+          vpk upload github
+          --repoUrl ${{ github.server_url }}/${{ github.repository }}
+          --token ${{ github.token }}
+          --outputDir linux-v4/packaging/Releases
+          --publish true
+          --merge true
+          --releaseName "AgentDeck ${{ inputs.tag }}"
+          --tag ${{ inputs.tag }}
+
+      - name: Attach installer script + checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" \
+            linux-v4/packaging/Releases/AgentDeck-Linux-Install.sh \
+            linux-v4/packaging/Releases/SHA256SUMS-linux.txt \
+            linux-v4/packaging/install.sh \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  build-mac:
+    # One `vpk upload --merge` into the shared release at a time, as in
+    # release.yml -- but a Linux failure must not cost the Mac build.
+    needs: build-linux
+    if: ${{ always() }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: atik806/AgentDeck-src
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.AGENTDECK_SRC_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-dotnet@3951f0dfe7a07e2313ec93c75700083e2005cbab # v4.3.0
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+
+      - name: Check the tag matches version.py
+        run: |
+          v=$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' windows_launcher/version.py)
+          if [ "$v" != "${TAG#v}" ]; then
+            echo "version.py ($v) != tag ($TAG)" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install "pip==24.3.1"
+          python -m pip install -c windows_launcher/constraints.txt -r mac-v4/packaging/requirements-mac.txt
+          python -m pip install -c windows_launcher/constraints.txt ./voice_capture
+
+      - name: Build + pack (unsigned)
+        run: python mac-v4/packaging/build_mac.py --unsigned
+
+      - name: Rename SHA256SUMS
+        run: mv mac-v4/packaging/Releases/SHA256SUMS.txt mac-v4/packaging/Releases/SHA256SUMS-mac.txt
+
+      - name: Remove old macOS files from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' |
+            grep -Ei -- '(-osx-|releases\.osx\.json|SHA256SUMS-mac\.txt)' |
+            while read -r name; do
+              echo "deleting $name"
+              gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" -y
+            done
+
+      - name: Publish to the release
+        run: >
+          vpk upload github
+          --repoUrl ${{ github.server_url }}/${{ github.repository }}
+          --token ${{ github.token }}
+          --outputDir mac-v4/packaging/Releases
+          --channel osx
+          --publish true
+          --merge true
+          --releaseName "AgentDeck ${{ inputs.tag }}"
+          --tag ${{ inputs.tag }}
+
+      - name: Attach checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release upload "$TAG" mac-v4/packaging/Releases/SHA256SUMS-mac.txt
+          --repo "$GITHUB_REPOSITORY" --clobber
