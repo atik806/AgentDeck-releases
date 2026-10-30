@@ -35,7 +35,11 @@ env:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: (1) the build's glibc is the oldest one the
+    # app runs on, so building on a newer Ubuntu drops users on older ones;
+    # (2) ubuntu-latest moved to 26.04 on 2026-10-25, whose PortAudio fails
+    # Pa_Initialize with no PulseAudio server, failing the voice import check.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
