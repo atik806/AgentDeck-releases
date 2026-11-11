@@ -59,10 +59,27 @@ jobs:
       - name: Install Velopack CLI
         run: dotnet tool install -g vpk
 
+      # GitHub's Ubuntu runners fetch packages through azure.archive.ubuntu.com
+      # first, and apt does not fall back to the next mirror when that name
+      # stops resolving: v0.48.2's Linux build failed twice (2026-11-11) on
+      # "Temporary failure resolving 'azure.archive.ubuntu.com'". Use Ubuntu's
+      # own servers instead, so one mirror's outage can't block a release.
+      - name: Use Ubuntu's main package servers (not the Azure mirror)
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            if ! grep -q 'archive\.ubuntu\.com' /etc/apt/apt-mirrors.txt; then
+              printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\n' | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+            echo "apt mirrors:"; cat /etc/apt/apt-mirrors.txt
+          fi
+          sudo find /etc/apt \( -name '*.list' -o -name '*.sources' \) -type f \
+            -exec sed -i 's#https\?://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' {} +
+
       - name: Install Qt/X11 runtime libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
             libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0 \
